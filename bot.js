@@ -4,12 +4,14 @@
 // ══════════════════════════════════════════════════════════════════
 
 const TelegramBot = require('node-telegram-bot-api');
+const http = require('http');
 
 // ── Configuração ──────────────────────────────────────────────────
 const BOT_TOKEN    = process.env.TELEGRAM_BOT_TOKEN;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const APP_URL      = process.env.APP_URL || '';
+const ADMIN_CHAT_ID = 1218556141; // Nessa Melo — notificações
 
 if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
   console.error('Faltam variáveis de ambiente.');
@@ -317,7 +319,7 @@ async function finalizarIndicacao(chatId) {
       tel: telNorm || dados.tel || '',
       ramo: dados.ramo || 'Outros',
       outros_detalhe: dados.outros_detalhe || '',
-      ig: '',
+      ig: dados.ig || '',
       tipo: 'externo',
       status: 'ok',
       condo_id: 1
@@ -345,6 +347,28 @@ async function finalizarIndicacao(chatId) {
   bot.sendMessage(chatId,
     `✅ *Indicação salva com sucesso!*\n\n*${dados.nome}* foi cadastrado e sua avaliação registrada. Obrigado pela contribuição! 🪨`,
     { parse_mode: 'Markdown', reply_markup: menuPrincipal() }
+  );
+
+  // Notificar admin
+  const indicoBadgeNotif = dados.indico === 'yes' ? '👍 Indico' : '👎 Não indico';
+  const starsNotif = '⭐'.repeat(dados.stars || 5);
+  await notificarAdmin(
+    `🆕 *Nova indicação no Grand Park!*
+
+` +
+    `🏷 *${dados.nome}*
+` +
+    `📂 ${dados.ramo || 'Outros'}${dados.outros_detalhe ? ' · ' + dados.outros_detalhe : ''}
+` +
+    `${starsNotif} · ${indicoBadgeNotif}
+` +
+    (dados.descricao ? `
+_"${dados.descricao}"_
+` : '') +
+    `
+📱 Cadastrado via bot por @${dados.username || 'telegram'}` +
+    (APP_URL ? `
+🔗 [Ver no app](${APP_URL})` : '')
   );
 }
 
@@ -381,7 +405,14 @@ bot.on('message', async (msg) => {
 
       case 'indicar_tel': {
         const tel = texto === '—' ? '' : texto;
-        estado[chatId] = { etapa: 'indicar_ramo', dados: { ...est.dados, tel } };
+        estado[chatId] = { etapa: 'indicar_ig', dados: { ...est.dados, tel } };
+        bot.sendMessage(chatId, 'Instagram do fornecedor? (sem o @)\n\nSe não souber, mande um traço: —');
+        break;
+      }
+
+      case 'indicar_ig': {
+        const ig = texto === '—' ? '' : texto.replace('@', '').trim();
+        estado[chatId] = { etapa: 'indicar_ramo', dados: { ...est.dados, ig } };
         const cats = await getCategories();
         const buttons = cats.map(c => ([{ text: c, callback_data: `cat_indicar:${c}` }]));
         bot.sendMessage(chatId, 'Qual é o ramo de atuação?', { reply_markup: { inline_keyboard: buttons } });
@@ -478,6 +509,81 @@ bot.on('message', async (msg) => {
   if (!est || est.etapa !== 'indicar_outros_detalhe') return;
   estado[chatId] = { etapa: 'indicar_descricao', dados: { ...est.dados, outros_detalhe: msg.text.trim() } };
   bot.sendMessage(chatId, 'Descreva brevemente o serviço que foi realizado:');
+});
+
+// ══════════════════════════════════════
+// WEBHOOK — recebe notificações do Supabase
+// ══════════════════════════════════════
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'vizinhoindica2026';
+const PORT = process.env.PORT || 3000;
+
+http.createServer(async (req, res) => {
+  // Verificar método e path
+  if(req.method !== 'POST' || req.url !== '/webhook'){
+    res.writeHead(404); res.end(); return;
+  }
+
+  // Verificar secret no header
+  const secret = req.headers['x-webhook-secret'];
+  if(secret !== WEBHOOK_SECRET){
+    res.writeHead(401); res.end('Unauthorized'); return;
+  }
+
+  // Ler body
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', async () => {
+    try {
+      const payload = JSON.parse(body);
+      const record = payload.record;
+      const table = payload.table;
+
+      if(!record) { res.writeHead(200); res.end('ok'); return; }
+
+      // Novo fornecedor cadastrado pelo app
+      if(table === 'suppliers' && record.condo_id === 1){
+        await notificarAdmin(
+          `🆕 *Novo fornecedor no Grand Park!*
+
+` +
+          `🏷 *${record.nome}*
+` +
+          `📂 ${record.ramo}${record.outros_detalhe ? ' · ' + record.outros_detalhe : ''}
+` +
+          `📱 Cadastrado pelo app` +
+          (APP_URL ? `
+🔗 [Ver no app](${APP_URL})` : '')
+        );
+      }
+
+      // Nova avaliação cadastrada pelo app
+      if(table === 'reviews' && record.condo_id === 1){
+        const stars = '⭐'.repeat(record.stars || 0);
+        const indico = record.indico === 'yes' ? '👍 Indico' : (record.reason === 'fraud' ? '⚠️ Golpista' : '👎 Não indico');
+        await notificarAdmin(
+          `⭐ *Nova avaliação no Grand Park!*
+
+` +
+          `Por: *${record.ap || 'Morador'}*
+` +
+          `${stars} · ${indico}
+` +
+          (record.descricao ? `
+_"${record.descricao}"_` : '') +
+          (APP_URL ? `
+
+🔗 [Ver no app](${APP_URL})` : '')
+        );
+      }
+
+      res.writeHead(200); res.end('ok');
+    } catch(e) {
+      console.error('Webhook error:', e.message);
+      res.writeHead(500); res.end('error');
+    }
+  });
+}).listen(PORT, () => {
+  console.log(`🌐 Webhook server rodando na porta ${PORT}`);
 });
 
 console.log('🤖 Grand Park Bot v2 iniciado...');
