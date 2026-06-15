@@ -20,6 +20,20 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
+// ══════════════════════════════════════
+// NOTIFICAÇÕES PARA O ADMIN
+// ══════════════════════════════════════
+async function notificarAdmin(mensagem){
+  try {
+    await bot.sendMessage(ADMIN_CHAT_ID, mensagem, {
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true
+    });
+  } catch(e) {
+    console.error('Erro ao notificar admin:', e.message);
+  }
+}
+
 // ── Dicionário de linguagem natural ──────────────────────────────
 const DICIONARIO = {
   'Elétrica':             ['elétri', 'eletri', 'tomada', 'disjuntor', 'fio', 'curto', 'luz', 'lampada', 'lâmpada', 'chuveiro elétrico', 'quadro elétrico', 'instalação elétrica'],
